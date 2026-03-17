@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 const lineLen = 256 // bytes per log line including newline
 const poolSize = 50
+const ticksPerSec = 10
 
 var paths = []string{
 	"/api/v1/query",
@@ -67,15 +69,11 @@ func generatePool() [poolSize]logTemplate {
 	return pool
 }
 
-// generateRandomPool pre-generates random lines (each lineLen bytes including newline)
 func generateRandomPool() [poolSize][]byte {
 	var pool [poolSize][]byte
 	for i := range pool {
 		buf := make([]byte, lineLen)
-		rand.Read(buf)
-		// Make it printable hex, but we need exactly lineLen bytes.
-		// Generate (lineLen-1)/2 random bytes, hex encode, take lineLen-1 chars, append newline.
-		raw := make([]byte, lineLen) // more than enough
+		raw := make([]byte, lineLen)
 		rand.Read(raw)
 		hexStr := hex.EncodeToString(raw)
 		copy(buf, hexStr[:lineLen-1])
@@ -116,40 +114,35 @@ func main() {
 		linesPerSec = 1
 	}
 
-	fmt.Fprintf(os.Stderr, "Starting log generator at ~%dKiB/s (%d lines/s, %d bytes/line, mode=%s)\n", rateKiB, linesPerSec, lineLen, mode)
+	// Batch: write linesPerBatch lines every 100ms
+	linesPerBatch := linesPerSec / ticksPerSec
+	if linesPerBatch < 1 {
+		linesPerBatch = 1
+	}
 
-	// Batch writes for high throughput: write batchSize lines per tick
-	batchSize := linesPerSec / 10
-	if batchSize < 1 {
-		batchSize = 1
-	}
-	ticksPerSec := linesPerSec / batchSize
-	if ticksPerSec < 1 {
-		ticksPerSec = 1
-	}
-	interval := time.Second / time.Duration(ticksPerSec)
-	ticker := time.NewTicker(interval)
+	fmt.Fprintf(os.Stderr, "Starting log generator at ~%dKiB/s (%d lines/s, %d bytes/line, batch=%d, mode=%s)\n",
+		rateKiB, linesPerSec, lineLen, linesPerBatch, mode)
+
+	w := bufio.NewWriterSize(os.Stdout, linesPerBatch*lineLen)
+	ticker := time.NewTicker(time.Second / ticksPerSec)
 	defer ticker.Stop()
-
-	batchBuf := make([]byte, 0, batchSize*lineLen)
 
 	if mode == "random" {
 		randomPool := generateRandomPool()
 		idx := 0
 		for range ticker.C {
-			batchBuf = batchBuf[:0]
-			for b := 0; b < batchSize; b++ {
-				batchBuf = append(batchBuf, randomPool[idx%poolSize]...)
+			for b := 0; b < linesPerBatch; b++ {
+				w.Write(randomPool[idx%poolSize])
 				idx++
 			}
-			os.Stdout.Write(batchBuf)
+			w.Flush()
 		}
 	} else {
 		structPool := generatePool()
 		idx := 0
+		line := make([]byte, lineLen)
 		for range ticker.C {
-			batchBuf = batchBuf[:0]
-			for b := 0; b < batchSize; b++ {
+			for b := 0; b < linesPerBatch; b++ {
 				idx++
 				t := structPool[idx%poolSize]
 				ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
@@ -164,16 +157,15 @@ func main() {
 					padLen = 0
 				}
 
-				line := make([]byte, lineLen)
 				copy(line, prefix)
 				for j := len(prefix); j < len(prefix)+padLen; j++ {
 					line[j] = 'x'
 				}
 				copy(line[len(prefix)+padLen:], "\"}\n")
 
-				batchBuf = append(batchBuf, line...)
+				w.Write(line)
 			}
-			os.Stdout.Write(batchBuf)
+			w.Flush()
 		}
 	}
 }
