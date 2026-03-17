@@ -4,6 +4,6 @@ COPY go.mod main.go ./
 RUN go build -o /log-generator .
 
 FROM alpine:latest
-COPY --from=build /log-generator /log-generator
+COPY --from=build /log-generator /usr/local/bin/log-generator
 
-ENTRYPOINT ["/log-generator"]
+ENTRYPOINT ["log-generator"]
