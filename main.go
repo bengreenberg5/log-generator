@@ -118,43 +118,62 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "Starting log generator at ~%dKiB/s (%d lines/s, %d bytes/line, mode=%s)\n", rateKiB, linesPerSec, lineLen, mode)
 
-	interval := time.Second / time.Duration(linesPerSec)
+	// Batch writes for high throughput: write batchSize lines per tick
+	batchSize := linesPerSec / 10
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	ticksPerSec := linesPerSec / batchSize
+	if ticksPerSec < 1 {
+		ticksPerSec = 1
+	}
+	interval := time.Second / time.Duration(ticksPerSec)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	batchBuf := make([]byte, 0, batchSize*lineLen)
 
 	if mode == "random" {
 		randomPool := generateRandomPool()
 		idx := 0
 		for range ticker.C {
-			os.Stdout.Write(randomPool[idx%poolSize])
-			idx++
+			batchBuf = batchBuf[:0]
+			for b := 0; b < batchSize; b++ {
+				batchBuf = append(batchBuf, randomPool[idx%poolSize]...)
+				idx++
+			}
+			os.Stdout.Write(batchBuf)
 		}
 	} else {
 		structPool := generatePool()
 		idx := 0
 		for range ticker.C {
-			idx++
-			t := structPool[idx%poolSize]
-			ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+			batchBuf = batchBuf[:0]
+			for b := 0; b < batchSize; b++ {
+				idx++
+				t := structPool[idx%poolSize]
+				ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 
-			prefix := fmt.Sprintf(
-				`{"ts":"%s","level":"%s","i":%d,"host":"%s","rid":"%s","latency_ms":%d,"bytes_in":%d,"path":"%s","pad":"`,
-				ts, t.level, idx, t.host, t.rid, t.latencyMs, t.bytesIn, t.path,
-			)
+				prefix := fmt.Sprintf(
+					`{"ts":"%s","level":"%s","i":%d,"host":"%s","rid":"%s","latency_ms":%d,"bytes_in":%d,"path":"%s","pad":"`,
+					ts, t.level, idx, t.host, t.rid, t.latencyMs, t.bytesIn, t.path,
+				)
 
-			padLen := lineLen - len(prefix) - 3
-			if padLen < 0 {
-				padLen = 0
+				padLen := lineLen - len(prefix) - 3
+				if padLen < 0 {
+					padLen = 0
+				}
+
+				line := make([]byte, lineLen)
+				copy(line, prefix)
+				for j := len(prefix); j < len(prefix)+padLen; j++ {
+					line[j] = 'x'
+				}
+				copy(line[len(prefix)+padLen:], "\"}\n")
+
+				batchBuf = append(batchBuf, line...)
 			}
-
-			buf := make([]byte, lineLen)
-			copy(buf, prefix)
-			for j := len(prefix); j < len(prefix)+padLen; j++ {
-				buf[j] = 'x'
-			}
-			copy(buf[len(prefix)+padLen:], "\"}\n")
-
-			os.Stdout.Write(buf)
+			os.Stdout.Write(batchBuf)
 		}
 	}
 }
